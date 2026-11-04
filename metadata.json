@@ -1,0 +1,6 @@
+{
+  "name": "أستاذي - تعلّم الإنجليزية بالدارجة الصوتية",
+  "description": "تطبيق ذكي لتعلم اللغة الإنجليزية عن طريق التحدث مباشرة بالدارجة المغربية مع أستاذ ذكاء اصطناعي صوتي تفاعلي، تصحيح النطق، سيناريوهات يومية، وشرح مبسط.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

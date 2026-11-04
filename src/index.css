@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-arabic: 'Alexandria', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-latin: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-arabic);
+    direction: rtl;
+    background-color: #0b0f19;
+    color: #f1f5f9;
+    overflow-x: hidden;
+  }
+
+  /* Latin text class for clear English pronunciation and text */
+  .font-latin {
+    font-family: var(--font-latin);
+    direction: ltr;
+  }
+}
+
+/* Custom soundwave pulse animation */
+@keyframes wave-pulse {
+  0%, 100% {
+    height: 12px;
+  }
+  50% {
+    height: 38px;
+  }
+}
+
+.animate-soundwave-1 {
+  animation: wave-pulse 1.2s ease-in-out infinite;
+}
+.animate-soundwave-2 {
+  animation: wave-pulse 0.9s ease-in-out infinite 0.15s;
+}
+.animate-soundwave-3 {
+  animation: wave-pulse 1.4s ease-in-out infinite 0.3s;
+}
+.animate-soundwave-4 {
+  animation: wave-pulse 0.8s ease-in-out infinite 0.45s;
+}
+.animate-soundwave-5 {
+  animation: wave-pulse 1.1s ease-in-out infinite 0.2s;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
