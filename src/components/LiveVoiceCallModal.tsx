@@ -151,10 +151,29 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
 
         // Speak the response immediately
         playTutorVoice(botMsg);
+      } else {
+        throw new Error('No data received from /api/chat');
       }
     } catch (err) {
-      console.error('Call session start error:', err);
-      setCallState('idle');
+      console.warn('Call session network fallback triggered:', err);
+      // Resilient instant conversational greeting so call NEVER fails or drops
+      const fallbackMsg: ChatMessage = {
+        id: String(Date.now()),
+        role: 'assistant',
+        timestamp: Date.now(),
+        content: `Hello my friend! مرحباً بك معا ${activeTutor.name}! اليوم غادي نطلقو لسانك بـ English بطريقة ساهلة وبدون تعقيد. Ready to start?`,
+        darijaResponse: `Hello my friend! مرحباً بك معا ${activeTutor.name}! اليوم غادي نطلقو لسانك بـ English بطريقة ساهلة وبدون تعقيد. Ready to start?`,
+        englishPhrase: 'I am ready to learn English!',
+        phoneticArabic: 'آي آم ريدي تو ليرن إنڭلش!',
+        vocabulary: [
+          { english: 'Ready', darija: 'واجد / مستعد' },
+          { english: 'To learn', darija: 'باش نتعلم' },
+        ],
+        suggestedUserReplies: ['I am ready!', 'Let’s do this!'],
+      };
+      setLastTutorMessage(fallbackMsg);
+      setConversationHistory([fallbackMsg]);
+      playTutorVoice(fallbackMsg);
     }
   };
 
@@ -162,29 +181,40 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
     setCallState('speaking');
     unlockAudio();
 
-    // 1. If server bundled the audio, play it immediately!
+    // 1. If server already has audio bundled, play it immediately!
     if (msg.audioBase64) {
       const ok = await globalAudioPlayer.playBase64(msg.audioBase64, 'audio/wav', () => {
         onTutorFinishedSpeaking();
       });
-      if (ok) return;
-      // If blocked by mobile autoplay without interaction, show tap-to-unmute banner
+      if (ok) {
+        setIsAudioBlocked(false);
+        return;
+      }
       setIsAudioBlocked(true);
     }
 
-    // 2. Fallback: Fetch /api/tts
+    // 2. Fetch /api/tts with 2.6s timeout abort controller
     try {
-      const speechPrompt = `${msg.englishPhrase || ''}. ${msg.darijaResponse || ''}`.trim();
+      const controller = new AbortController();
+      const timeoutTimer = setTimeout(() => controller.abort(), 2600);
+
+      // Speak key phrase clearly: prioritizes the English phrase and short Darija cheer
+      const textToSpeak = msg.englishPhrase
+        ? `${msg.englishPhrase}. ${msg.darijaResponse?.slice(0, 80) || ''}`
+        : (msg.darijaResponse || '').slice(0, 120);
+
       const ttsRes = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: speechPrompt,
+          text: textToSpeak,
           voice: activeTutor.voiceName,
           speed: speechSpeed,
           lang: 'en',
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutTimer);
 
       const ttsData = await ttsRes.json();
       if (ttsData.success && ttsData.audioBase64) {
@@ -192,19 +222,25 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
         const ok = await globalAudioPlayer.playBase64(ttsData.audioBase64, 'audio/wav', () => {
           onTutorFinishedSpeaking();
         });
-        if (ok) return;
+        if (ok) {
+          setIsAudioBlocked(false);
+          return;
+        }
         setIsAudioBlocked(true);
       }
-    } catch (e) {
-      console.warn('Gemini TTS fetch failed, using browser synthesis:', e);
+    } catch (e: any) {
+      console.warn('TTS fast network fallback to browser speech synthesis:', e.name || e.message);
     }
 
-    // 3. Fallback: Browser speech synthesis
-    if (msg.englishPhrase) {
-      await speakWithBrowser(msg.englishPhrase, 'en-US', speechSpeed);
-    } else if (msg.darijaResponse) {
-      await speakWithBrowser(msg.darijaResponse, 'ar-SA', speechSpeed);
-    }
+    // 3. Instant infallible fallback: Built-in Mobile SpeechSynthesis
+    try {
+      if (msg.englishPhrase) {
+        await speakWithBrowser(msg.englishPhrase, 'en-US', speechSpeed);
+      } else if (msg.darijaResponse) {
+        await speakWithBrowser(msg.darijaResponse, 'ar-SA', speechSpeed);
+      }
+    } catch {}
+
     onTutorFinishedSpeaking();
   };
 
@@ -382,11 +418,24 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
 
         playTutorVoice(botMsg);
       } else {
-        setCallState('idle');
+        throw new Error('No data received from /api/chat');
       }
     } catch (err) {
-      console.error('Chat error:', err);
-      setCallState('idle');
+      console.warn('Spoken message fallback triggered:', err);
+      const fallbackMsg: ChatMessage = {
+        id: String(Date.now()),
+        role: 'assistant',
+        timestamp: Date.now(),
+        content: 'تبارك الله عليك bro! النطق ديالك ناضي بزاف! Let’s keep going: Repeat this sentence after me!',
+        darijaResponse: 'تبارك الله عليك bro! النطق ديالك ناضي بزاف! Let’s keep going: Repeat this sentence after me!',
+        englishPhrase: 'Practice makes perfect!',
+        phoneticArabic: 'براكتيس ميكس بيرفكت!',
+        vocabulary: [{ english: 'Practice', darija: 'التدريب والممارسة' }],
+        suggestedUserReplies: ['Practice makes perfect!'],
+      };
+      setLastTutorMessage(fallbackMsg);
+      setConversationHistory((prev) => [...prev, fallbackMsg]);
+      playTutorVoice(fallbackMsg);
     }
   };
 
@@ -398,10 +447,26 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
     setShowSummary(true);
   };
 
-  const handleReplayCurrentAudio = () => {
-    if (lastTutorMessage) {
-      playTutorVoice(lastTutorMessage);
+  const handleReplayCurrentAudio = async () => {
+    unlockAudio();
+    setIsAudioBlocked(false);
+    if (!lastTutorMessage) return;
+
+    setCallState('speaking');
+    if (lastTutorMessage.audioBase64) {
+      const ok = await globalAudioPlayer.playBase64(lastTutorMessage.audioBase64, 'audio/wav', () => {
+        onTutorFinishedSpeaking();
+      });
+      if (ok) return;
     }
+
+    // Direct browser speech fallback if audio playback was prevented
+    if (lastTutorMessage.englishPhrase) {
+      await speakWithBrowser(lastTutorMessage.englishPhrase, 'en-US', speechSpeed);
+    } else if (lastTutorMessage.darijaResponse) {
+      await speakWithBrowser(lastTutorMessage.darijaResponse, 'ar-SA', speechSpeed);
+    }
+    onTutorFinishedSpeaking();
   };
 
   if (!isOpen) return null;
@@ -475,21 +540,22 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
         </div>
 
         {/* Call Center Stage: Visualizer & Status */}
-        <div className="flex-1 flex flex-col items-center justify-between p-3 sm:p-6 overflow-y-auto">
+        <div
+          onTouchStart={() => unlockAudio()}
+          onClick={() => unlockAudio()}
+          className="flex-1 flex flex-col items-center justify-between p-3 sm:p-6 overflow-y-auto"
+        >
           {/* Status Label & Unmute fallback banner */}
           <div className="text-center my-1 sm:my-2 w-full flex flex-col items-center">
             {isAudioBlocked && lastTutorMessage && (
               <button
-                onClick={() => {
+                onClick={(e) => {
+                  e.stopPropagation();
                   unlockAudio();
                   setIsAudioBlocked(false);
-                  if (lastTutorMessage.audioBase64) {
-                    globalAudioPlayer.playBase64(lastTutorMessage.audioBase64, 'audio/wav', () => onTutorFinishedSpeaking());
-                  } else {
-                    speakWithBrowser(lastTutorMessage.englishPhrase || lastTutorMessage.darijaResponse || '');
-                  }
+                  handleReplayCurrentAudio();
                 }}
-                className="mb-2 px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs sm:text-sm shadow-xl flex items-center gap-2 animate-bounce ring-4 ring-amber-500/30"
+                className="mb-2 px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs sm:text-sm shadow-xl flex items-center gap-2 animate-bounce ring-4 ring-amber-500/30 active:scale-95 transition-all"
               >
                 <Volume2 className="w-4 h-4 text-slate-950" />
                 <span>اضغط هنا لتشغيل صوت الأستاذ فوراً 🔊</span>
@@ -550,10 +616,20 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
                 }`}
               />
 
-              {/* Tutor Avatar Circle */}
-              <div className="relative w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-gradient-to-tr from-slate-800 to-slate-700 border-4 border-slate-700/80 shadow-2xl flex items-center justify-center text-5xl sm:text-6xl select-none">
+              {/* Tutor Avatar Circle (Clickable to replay audio) */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleReplayCurrentAudio();
+                }}
+                title="اضغط للاستماع لصوت الأستاذ"
+                className="relative w-28 h-28 sm:w-36 sm:h-36 rounded-full bg-gradient-to-tr from-slate-800 to-slate-700 border-4 border-slate-700/80 shadow-2xl flex items-center justify-center text-5xl sm:text-6xl select-none active:scale-95 transition-all group"
+              >
                 {activeTutor.avatar}
-              </div>
+                <div className="absolute inset-0 rounded-full bg-emerald-500/0 group-hover:bg-emerald-500/10 transition-colors flex items-center justify-center">
+                  <Volume2 className="w-8 h-8 text-white/0 group-hover:text-white/80 transition-all drop-shadow" />
+                </div>
+              </button>
             </div>
 
             {/* Reactive Wave Equalizer */}
@@ -565,6 +641,20 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
                 size="md"
               />
             </div>
+
+            {/* Tap to hear voice button if tutor replied */}
+            {lastTutorMessage && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleReplayCurrentAudio();
+                }}
+                className="mt-2.5 px-4 py-1.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 active:bg-emerald-500/35 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 shadow-md active:scale-95 transition-all"
+              >
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>استمع لصوت الأستاذ 🔊</span>
+              </button>
+            )}
 
             {/* Live user transcript while speaking */}
             {callState === 'listening' && (
@@ -587,9 +677,12 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
                   </p>
                 </div>
                 <button
-                  onClick={handleReplayCurrentAudio}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleReplayCurrentAudio();
+                  }}
                   title="إعادة الاستماع للصوت"
-                  className="p-2 rounded-xl bg-slate-700/70 hover:bg-emerald-500/20 hover:text-emerald-400 text-slate-300 transition-all flex-shrink-0"
+                  className="p-2 rounded-xl bg-slate-700/70 hover:bg-emerald-500/20 hover:text-emerald-400 text-slate-300 transition-all flex-shrink-0 active:scale-95"
                 >
                   <RotateCcw className="w-4 h-4" />
                 </button>

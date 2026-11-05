@@ -19,32 +19,45 @@ export const getAudioContext = (): AudioContext | null => {
   return sharedAudioContext;
 };
 
-// Crucial for mobile: unlock audio on ANY user gesture (tap/click)
+// Crucial for mobile: unlock audio on ANY user gesture (tap/click/touch)
 export const unlockAudio = () => {
   if (typeof window === 'undefined') return;
 
   try {
-    // 1. Unlock AudioContext
+    // 1. Unlock AudioContext with silent buffer
     const ctx = getAudioContext();
-    if (ctx && ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
+    if (ctx) {
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      try {
+        const silentBuffer = ctx.createBuffer(1, 1, 22050);
+        const source = ctx.createBufferSource();
+        source.buffer = silentBuffer;
+        source.connect(ctx.destination);
+        source.start(0);
+      } catch {}
     }
 
     // 2. Unlock reusable HTMLAudioElement with silent 1-sample WAV
     if (!sharedAudioElement) {
       sharedAudioElement = new Audio();
       sharedAudioElement.id = 'ostadi-master-audio';
-      // Extremely tiny silent WAV base64
+      sharedAudioElement.setAttribute('playsinline', 'true');
+      sharedAudioElement.setAttribute('webkit-playsinline', 'true');
       sharedAudioElement.src =
         'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-      sharedAudioElement.play().then(() => {
-        if (sharedAudioElement) sharedAudioElement.pause();
-      }).catch(() => {});
+      sharedAudioElement.play().catch(() => {});
     }
 
     // 3. Unlock SpeechSynthesis on mobile
     if ('speechSynthesis' in window) {
       window.speechSynthesis.resume();
+      try {
+        const silentUtterance = new SpeechSynthesisUtterance(' ');
+        silentUtterance.volume = 0.01;
+        window.speechSynthesis.speak(silentUtterance);
+      } catch {}
     }
 
     isAudioUnlocked = true;
@@ -139,6 +152,7 @@ export class AudioPlayer {
   private currentAudioUrl: string | null = null;
   private currentSourceNode: AudioBufferSourceNode | null = null;
   private isCurrentlyPlaying = false;
+  private safetyTimer: any = null;
 
   public async playBase64(
     base64: string,
@@ -148,13 +162,21 @@ export class AudioPlayer {
     this.stop();
     unlockAudio();
 
-    // Strategy 1: Try HTMLAudioElement with Blob URL (best for mobile streaming)
+    // Strategy 1: Try Web Audio API direct decoding first (most reliable on mobile for 24kHz WAV)
+    const webAudioSuccess = await this.playViaWebAudio(base64, onEnded);
+    if (webAudioSuccess) {
+      return true;
+    }
+
+    // Strategy 2: Fallback to HTMLAudioElement with Blob URL
     try {
       const blobUrl = base64ToBlobUrl(base64, mimeType);
       this.currentAudioUrl = blobUrl;
 
       const audio = sharedAudioElement || new Audio();
       sharedAudioElement = audio;
+      audio.setAttribute('playsinline', 'true');
+      audio.setAttribute('webkit-playsinline', 'true');
       audio.src = blobUrl;
       audio.playbackRate = 1.0;
 
@@ -164,6 +186,7 @@ export class AudioPlayer {
           if (isDone) return;
           isDone = true;
           this.isCurrentlyPlaying = false;
+          if (this.safetyTimer) clearTimeout(this.safetyTimer);
           if (blobUrl) {
             try {
               URL.revokeObjectURL(blobUrl);
@@ -174,10 +197,10 @@ export class AudioPlayer {
         };
 
         audio.onended = () => cleanup(true);
-        audio.onerror = () => {
-          // If HTMLAudio fails, try Strategy 2: Web Audio API buffer
-          this.playViaWebAudio(base64, onEnded).then(resolve);
-        };
+        audio.onerror = () => cleanup(false);
+
+        // Safety watchdog: max 12 seconds
+        this.safetyTimer = setTimeout(() => cleanup(true), 12000);
 
         const playPromise = audio.play();
         if (playPromise !== undefined) {
@@ -186,24 +209,26 @@ export class AudioPlayer {
               this.isCurrentlyPlaying = true;
             })
             .catch((err) => {
-              console.warn('HTMLAudio play failed, falling back to WebAudio:', err);
-              // Fallback to Web Audio
-              this.playViaWebAudio(base64, onEnded).then(resolve);
+              console.warn('HTMLAudio play failed:', err);
+              cleanup(false);
             });
         }
       });
     } catch (err) {
-      console.warn('Audio play exception, fallback to WebAudio:', err);
-      return this.playViaWebAudio(base64, onEnded);
+      console.warn('Audio play exception:', err);
+      if (onEnded) onEnded();
+      return false;
     }
   }
 
-  // Strategy 2: Web Audio API direct decoding
+  // Strategy 1: Web Audio API direct decoding with safety watchdog
   public async playViaWebAudio(base64: string, onEnded?: () => void): Promise<boolean> {
     try {
       const ctx = getAudioContext();
       if (!ctx) return false;
-      if (ctx.state === 'suspended') await ctx.resume();
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
 
       const binaryString = atob(base64);
       const len = binaryString.length;
@@ -212,7 +237,19 @@ export class AudioPlayer {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+      // decodeAudioData with promise + fallback
+      let audioBuffer: AudioBuffer;
+      try {
+        audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+      } catch (decodeErr) {
+        // Fallback for Safari callback syntax
+        audioBuffer = await new Promise((resolve, reject) => {
+          ctx.decodeAudioData(bytes.buffer.slice(0), resolve, reject);
+        });
+      }
+
+      if (!audioBuffer) return false;
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
@@ -220,17 +257,27 @@ export class AudioPlayer {
       this.isCurrentlyPlaying = true;
 
       return new Promise<boolean>((resolve) => {
-        source.onended = () => {
+        let isDone = false;
+        const cleanup = (success: boolean) => {
+          if (isDone) return;
+          isDone = true;
           this.isCurrentlyPlaying = false;
           this.currentSourceNode = null;
+          if (this.safetyTimer) clearTimeout(this.safetyTimer);
           if (onEnded) onEnded();
-          resolve(true);
+          resolve(success);
         };
+
+        source.onended = () => cleanup(true);
+
+        // Safety watchdog timer: if Safari pauses audio or misses onended, never stay stuck
+        const durationMs = Math.ceil((audioBuffer.duration || 3) * 1000) + 500;
+        this.safetyTimer = setTimeout(() => cleanup(true), Math.max(durationMs, 2000));
+
         source.start(0);
       });
     } catch (e) {
-      console.error('WebAudio decode failed:', e);
-      if (onEnded) onEnded();
+      console.warn('WebAudio decode failed:', e);
       return false;
     }
   }
