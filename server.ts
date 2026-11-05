@@ -142,7 +142,43 @@ RULES FOR ULTRA-FAST & NATURAL CONVERSATION:
       };
     }
 
-    return res.json({ success: true, data });
+    // Generate speech audio directly so the client receives text + audio together
+    let audioBase64: string | null = null;
+    try {
+      const voiceName = tutorGender === 'female' ? 'Kore' : 'Puck';
+      const speechPrompt = `${data.englishPhrase || ''}. ${data.darijaResponse || ''}`.trim();
+      
+      const ttsResponse = await ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Say with a natural, friendly Moroccan bilingual tone: ${speechPrompt}`,
+                speechMetadata: {
+                  style: 'Warm and encouraging bilingual language coach',
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+        },
+      });
+
+      audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    } catch (ttsErr) {
+      console.warn('Direct chat TTS generation skipped, client will use fallback:', ttsErr);
+    }
+
+    return res.json({ success: true, data, audioBase64 });
   } catch (error: any) {
     console.error('Error in /api/chat:', error);
     return res.status(500).json({

@@ -11,7 +11,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { VocabularyItem } from '../types';
-import { speakWithBrowser, playSoundEffect } from '../utils/audio';
+import { speakWithBrowser, playSoundEffect, unlockAudio } from '../utils/audio';
 
 interface VocabularyBookProps {
   vocabularyList: VocabularyItem[];

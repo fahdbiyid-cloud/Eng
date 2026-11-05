@@ -24,7 +24,8 @@ import { PronunciationTrainer } from './components/PronunciationTrainer';
 import { VocabularyBook } from './components/VocabularyBook';
 import { VoiceQuiz } from './components/VoiceQuiz';
 import { AudioWaveVisualizer } from './components/AudioWaveVisualizer';
-import { speakWithBrowser, playSoundEffect } from './utils/audio';
+import { MobileBottomNav } from './components/MobileBottomNav';
+import { speakWithBrowser, playSoundEffect, unlockAudio } from './utils/audio';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'call' | 'chat' | 'scenarios' | 'pronounce' | 'vocab' | 'quiz'>('call');
@@ -32,6 +33,19 @@ export default function App() {
   const [activeScenario, setActiveScenario] = useState<Scenario>(SCENARIOS[0]);
   const [userLevel, setUserLevel] = useState<LearningLevel>('beginner');
   const [isLiveCallOpen, setIsLiveCallOpen] = useState(false);
+
+  // Global mobile audio unlock on first user gesture
+  useEffect(() => {
+    const handleGesture = () => {
+      unlockAudio();
+    };
+    window.addEventListener('click', handleGesture, { passive: true });
+    window.addEventListener('touchstart', handleGesture, { passive: true });
+    return () => {
+      window.removeEventListener('click', handleGesture);
+      window.removeEventListener('touchstart', handleGesture);
+    };
+  }, []);
 
   // Gamification & storage
   const [vocabularyList, setVocabularyList] = useState<VocabularyItem[]>(() => {
@@ -105,8 +119,8 @@ export default function App() {
         xpPoints={xpPoints}
       />
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
+      {/* Main Container with mobile bottom bar padding */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-28 md:pb-8">
         {/* Tab 1: Live Voice Call Hub */}
         {activeTab === 'call' && (
           <div className="space-y-8">
@@ -331,6 +345,13 @@ export default function App() {
         onSelectTutor={setActiveTutor}
         onAddVocabulary={handleAddVocabulary}
         userLevel={userLevel}
+      />
+
+      {/* Mobile Bottom Navigation Bar */}
+      <MobileBottomNav
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        onStartCall={() => handleStartLiveCall()}
       />
     </div>
   );

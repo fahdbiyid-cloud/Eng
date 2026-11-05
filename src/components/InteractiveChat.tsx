@@ -16,6 +16,7 @@ import {
   speakWithBrowser,
   LiveSpeechRecognizer,
   playSoundEffect,
+  unlockAudio,
 } from '../utils/audio';
 
 interface InteractiveChatProps {
@@ -139,6 +140,7 @@ export const InteractiveChat: React.FC<InteractiveChatProps> = ({
           vocabulary: data.data.vocabulary,
           encouragement: data.data.encouragement,
           suggestedUserReplies: data.data.suggestedUserReplies,
+          audioBase64: data.audioBase64,
         };
         setMessages((prev) => [...prev, botMsg]);
         playSoundEffect('ding');
@@ -185,29 +187,37 @@ export const InteractiveChat: React.FC<InteractiveChatProps> = ({
     }
   };
 
-  const handlePlayAudio = async (text: string, lang = 'en') => {
-    // Immediate instant playback with browser for zero waiting time
+  const handlePlayAudio = async (text: string, lang = 'en', audioBase64?: string) => {
+    unlockAudio();
+    // Priority 1: If audioBase64 is cached, play it directly!
+    if (audioBase64) {
+      const ok = await globalAudioPlayer.playBase64(audioBase64, 'audio/wav');
+      if (ok) return;
+    }
+
+    // Priority 2: Instant browser speech
     try {
       await speakWithBrowser(text, lang === 'en' ? 'en-US' : 'ar-SA', 0.9);
-    } catch {
-      // Fallback to server TTS if browser speech fails
-      try {
-        const res = await fetch('/api/tts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text,
-            voice: activeTutor.voiceName,
-            lang,
-          }),
-        });
-        const data = await res.json();
-        if (data.success && data.audioBase64) {
-          await globalAudioPlayer.playBase64(data.audioBase64, 'audio/wav');
-        }
-      } catch (e) {
-        console.warn('TTS playback error:', e);
+      return;
+    } catch {}
+
+    // Priority 3: Server TTS fallback
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          voice: activeTutor.voiceName,
+          lang,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.audioBase64) {
+        await globalAudioPlayer.playBase64(data.audioBase64, 'audio/wav');
       }
+    } catch (e) {
+      console.warn('TTS playback error:', e);
     }
   };
 
@@ -275,7 +285,7 @@ export const InteractiveChat: React.FC<InteractiveChatProps> = ({
                     {msg.darijaResponse}
                   </p>
                   <button
-                    onClick={() => handlePlayAudio(msg.englishPhrase || msg.darijaResponse || '')}
+                    onClick={() => handlePlayAudio(msg.englishPhrase || msg.darijaResponse || '', 'en', msg.audioBase64)}
                     title="تشغيل الصوت"
                     className="p-1.5 rounded-lg bg-slate-700 hover:bg-emerald-500/20 hover:text-emerald-400 text-slate-300 transition-all flex-shrink-0"
                   >
@@ -299,7 +309,7 @@ export const InteractiveChat: React.FC<InteractiveChatProps> = ({
                         "{msg.englishPhrase}"
                       </p>
                       <button
-                        onClick={() => handlePlayAudio(msg.englishPhrase!, 'en')}
+                        onClick={() => handlePlayAudio(msg.englishPhrase!, 'en', msg.audioBase64)}
                         className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold transition-all flex items-center gap-1 flex-shrink-0"
                       >
                         <Volume2 className="w-3.5 h-3.5" />

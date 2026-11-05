@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { QuizQuestion } from '../types';
-import { speakWithBrowser, playSoundEffect } from '../utils/audio';
+import { speakWithBrowser, playSoundEffect, unlockAudio } from '../utils/audio';
 
 export const VoiceQuiz: React.FC = () => {
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);

@@ -22,6 +22,7 @@ import {
   LiveSpeechRecognizer,
   AudioRecorder,
   playSoundEffect,
+  unlockAudio,
 } from '../utils/audio';
 
 interface LiveVoiceCallModalProps {
@@ -99,13 +100,18 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const [isAudioBlocked, setIsAudioBlocked] = useState(false);
+  const silenceTimerRef = useRef<any>(null);
+
   const startCallSession = async () => {
     try {
+      unlockAudio();
       setCallState('thinking');
+      setIsAudioBlocked(false);
       const initialGreeting =
         activeScenario.id === 'free_chat'
-          ? `سلام عليكم أستاذي ${activeTutor.name}، بغيت نبدا نهدر معاك بالدارجة وتعلمني الإنجليزية!`
-          : `سلام! أنا دابا فـ سيناريو: "${activeScenario.title}". ${activeScenario.starterPrompt}`;
+          ? `Hey أستاذي! سلام، بغيت نبدا نهدر معاك بالدارجة مخلطة بـ English وتعلّمني دابا!`
+          : `Hey! أنا دابا فـ سيناريو: "${activeScenario.title}". ${activeScenario.starterPrompt}`;
 
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -133,6 +139,7 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
           vocabulary: json.data.vocabulary,
           encouragement: json.data.encouragement,
           suggestedUserReplies: json.data.suggestedUserReplies,
+          audioBase64: json.audioBase64,
         };
 
         setLastTutorMessage(botMsg);
@@ -142,7 +149,7 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
           setLearnedCount((prev) => prev + botMsg.vocabulary!.length);
         }
 
-        // Speak the response
+        // Speak the response immediately
         playTutorVoice(botMsg);
       }
     } catch (err) {
@@ -151,77 +158,70 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
     }
   };
 
-  const [voiceEngine, setVoiceEngine] = useState<'instant' | 'studio'>('instant');
-  const silenceTimerRef = useRef<any>(null);
-
   const playTutorVoice = async (msg: ChatMessage) => {
     setCallState('speaking');
+    unlockAudio();
 
-    // Priority 1: Instant zero-latency voice (no network waiting)
-    if (voiceEngine === 'instant') {
-      try {
-        // Speak English phrase clearly with natural rate, and Darija smoothly
-        if (msg.englishPhrase) {
-          await speakWithBrowser(msg.englishPhrase, 'en-US', speechSpeed);
-        } else if (msg.darijaResponse) {
-          await speakWithBrowser(msg.darijaResponse, 'ar-SA', speechSpeed);
-        }
+    // 1. If server bundled the audio, play it immediately!
+    if (msg.audioBase64) {
+      const ok = await globalAudioPlayer.playBase64(msg.audioBase64, 'audio/wav', () => {
         onTutorFinishedSpeaking();
-        return;
-      } catch (err) {
-        console.warn('Browser speech error, trying server:', err);
-      }
+      });
+      if (ok) return;
+      // If blocked by mobile autoplay without interaction, show tap-to-unmute banner
+      setIsAudioBlocked(true);
     }
 
-    // Priority 2: Studio Gemini TTS with fast timeout fallback
+    // 2. Fallback: Fetch /api/tts
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500); // Max 3.5s wait
-
+      const speechPrompt = `${msg.englishPhrase || ''}. ${msg.darijaResponse || ''}`.trim();
       const ttsRes = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
         body: JSON.stringify({
-          text: msg.englishPhrase || msg.darijaResponse,
+          text: speechPrompt,
           voice: activeTutor.voiceName,
           speed: speechSpeed,
-          lang: msg.englishPhrase ? 'en' : 'ar',
+          lang: 'en',
         }),
       });
 
-      clearTimeout(timeoutId);
       const ttsData = await ttsRes.json();
       if (ttsData.success && ttsData.audioBase64) {
-        await globalAudioPlayer.playBase64(ttsData.audioBase64, 'audio/wav', () => {
+        msg.audioBase64 = ttsData.audioBase64;
+        const ok = await globalAudioPlayer.playBase64(ttsData.audioBase64, 'audio/wav', () => {
           onTutorFinishedSpeaking();
         });
-        return;
+        if (ok) return;
+        setIsAudioBlocked(true);
       }
     } catch (e) {
-      console.warn('Gemini TTS timed out or failed, falling back to instant browser voice:', e);
+      console.warn('Gemini TTS fetch failed, using browser synthesis:', e);
     }
 
-    // Fallback: Browser speech synthesis immediately
+    // 3. Fallback: Browser speech synthesis
     if (msg.englishPhrase) {
       await speakWithBrowser(msg.englishPhrase, 'en-US', speechSpeed);
+    } else if (msg.darijaResponse) {
+      await speakWithBrowser(msg.darijaResponse, 'ar-SA', speechSpeed);
     }
     onTutorFinishedSpeaking();
   };
 
   const onTutorFinishedSpeaking = () => {
+    setIsAudioBlocked(false);
     playSoundEffect('ding');
     if (autoListen && !isMuted) {
-      // Auto switch to listening after tutor stops
       setTimeout(() => {
         startListening();
-      }, 350);
+      }, 400);
     } else {
       setCallState('idle');
     }
   };
 
   const startListening = () => {
+    unlockAudio();
     if (callState === 'speaking') {
       globalAudioPlayer.stop();
     }
@@ -237,19 +237,18 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
 
     // Use Web Speech Recognition if available
     if (recognizerRef.current && recognizerRef.current.isAvailable()) {
-      // Listen in Moroccan Arabic or English
       recognizerRef.current.setLang('ar-MA');
       recognizerRef.current.onResultCallback = (res) => {
         setCurrentTranscript(res.transcript);
 
-        // Auto silence detection: if user paused for 1.2s after speaking at least 2 words, auto send!
+        // Auto silence detection: auto send if user stopped speaking
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         if (res.transcript.trim().length > 3) {
           silenceTimerRef.current = setTimeout(() => {
             if (isListeningRef.current) {
               stopListeningAndSend(res.transcript.trim());
             }
-          }, 1300);
+          }, 1400);
         }
 
         if (res.isFinal && res.transcript.trim()) {
@@ -371,6 +370,7 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
           vocabulary: json.data.vocabulary,
           encouragement: json.data.encouragement,
           suggestedUserReplies: json.data.suggestedUserReplies,
+          audioBase64: json.audioBase64,
         };
 
         setLastTutorMessage(botMsg);
@@ -407,16 +407,16 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-xl p-3 sm:p-6 transition-all">
-      <div className="relative w-full max-w-3xl h-[92vh] max-h-[850px] bg-gradient-to-b from-slate-900 via-slate-900/95 to-slate-950 border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950 p-0 sm:p-6 transition-all">
+      <div className="relative w-full max-w-3xl h-[100dvh] sm:h-[92vh] max-h-none sm:max-h-[850px] bg-gradient-to-b from-slate-900 via-slate-900/95 to-slate-950 border-0 sm:border border-slate-800 rounded-none sm:rounded-3xl shadow-2xl flex flex-col overflow-hidden">
         
         {/* Top Call Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800/80 bg-slate-900/40">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md">
+          <div className="flex items-center gap-2.5 sm:gap-3">
             <div className="relative">
-              <span className="text-3xl">{activeTutor.avatar}</span>
+              <span className="text-2xl sm:text-3xl">{activeTutor.avatar}</span>
               <span
-                className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-slate-900 ${
+                className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-slate-900 ${
                   callState === 'speaking'
                     ? 'bg-emerald-400 animate-pulse'
                     : callState === 'listening'
@@ -426,50 +426,44 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
               />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-base sm:text-lg">{activeTutor.name}</h3>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <h3 className="font-bold text-white text-sm sm:text-lg">{activeTutor.name}</h3>
+                <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   {activeScenario.title}
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-xs text-slate-400">
+              <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-400">
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span>مكالمة صوتية مباشرة</span>
+                <span>مكالمة صوتية</span>
                 <span>•</span>
                 <span className="font-mono text-emerald-400">{formatDuration(callDuration)}</span>
               </div>
             </div>
           </div>
 
-          {/* Quick Settings: Engine, Speed & Auto-Listen */}
+          {/* Quick Settings: Speed & Auto-Listen */}
           <div className="flex items-center gap-1.5 sm:gap-2">
             <button
-              onClick={() => setVoiceEngine((prev) => (prev === 'instant' ? 'studio' : 'instant'))}
-              title="محرك الصوت: فوري سريع بدون انتظار أو استوديو"
-              className={`px-2.5 py-1 text-xs rounded-xl border transition-all font-bold flex items-center gap-1 ${
-                voiceEngine === 'instant'
-                  ? 'bg-emerald-500/25 border-emerald-500/50 text-emerald-300 shadow-sm'
-                  : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <span>⚡</span>
-              <span>{voiceEngine === 'instant' ? 'رد فوري سريع' : 'استوديو'}</span>
-            </button>
-            <button
-              onClick={() => setSpeechSpeed((prev) => (prev === 1.0 ? 0.8 : 1.0))}
+              onClick={() => {
+                unlockAudio();
+                setSpeechSpeed((prev) => (prev === 1.0 ? 0.8 : 1.0));
+              }}
               title="سرعة نطق الأستاذ"
-              className={`px-2.5 py-1 text-xs rounded-xl border transition-all font-medium ${
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs rounded-xl border transition-all font-medium ${
                 speechSpeed === 0.8
                   ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
                   : 'bg-slate-800/60 border-slate-700 text-slate-300 hover:bg-slate-800'
               }`}
             >
-              سرعة: {speechSpeed === 0.8 ? '0.8x' : '1.0x'}
+              {speechSpeed === 0.8 ? '0.8x بطيء' : '1.0x عادي'}
             </button>
             <button
-              onClick={() => setAutoListen(!autoListen)}
+              onClick={() => {
+                unlockAudio();
+                setAutoListen(!autoListen);
+              }}
               title="الاستماع التلقائي بعد انتهاء الأستاذ"
-              className={`px-2.5 py-1 text-xs rounded-xl border transition-all font-medium ${
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs rounded-xl border transition-all font-medium ${
                 autoListen
                   ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
                   : 'bg-slate-800/60 border-slate-700 text-slate-400'
@@ -481,42 +475,60 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
         </div>
 
         {/* Call Center Stage: Visualizer & Status */}
-        <div className="flex-1 flex flex-col items-center justify-between p-4 sm:p-6 overflow-y-auto">
-          {/* Status Label */}
-          <div className="text-center my-2">
+        <div className="flex-1 flex flex-col items-center justify-between p-3 sm:p-6 overflow-y-auto">
+          {/* Status Label & Unmute fallback banner */}
+          <div className="text-center my-1 sm:my-2 w-full flex flex-col items-center">
+            {isAudioBlocked && lastTutorMessage && (
+              <button
+                onClick={() => {
+                  unlockAudio();
+                  setIsAudioBlocked(false);
+                  if (lastTutorMessage.audioBase64) {
+                    globalAudioPlayer.playBase64(lastTutorMessage.audioBase64, 'audio/wav', () => onTutorFinishedSpeaking());
+                  } else {
+                    speakWithBrowser(lastTutorMessage.englishPhrase || lastTutorMessage.darijaResponse || '');
+                  }
+                }}
+                className="mb-2 px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-bold text-xs sm:text-sm shadow-xl flex items-center gap-2 animate-bounce ring-4 ring-amber-500/30"
+              >
+                <Volume2 className="w-4 h-4 text-slate-950" />
+                <span>اضغط هنا لتشغيل صوت الأستاذ فوراً 🔊</span>
+              </button>
+            )}
+
             {callState === 'connecting' && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-800/80 text-slate-300 text-sm animate-pulse border border-slate-700">
-                <Sparkles className="w-4 h-4 text-emerald-400" />
+              <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-slate-800/80 text-slate-300 text-xs sm:text-sm animate-pulse border border-slate-700">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
                 جاري الاتصال بالأستاذ...
               </span>
             )}
             {callState === 'speaking' && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-500/20 text-emerald-300 text-sm border border-emerald-500/30">
-                <Volume2 className="w-4 h-4 animate-bounce" />
+              <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs sm:text-sm border border-emerald-500/30">
+                <Volume2 className="w-3.5 h-3.5 animate-bounce" />
                 {activeTutor.name} كيهدر ويشرح دابا...
               </span>
             )}
             {callState === 'listening' && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/20 text-amber-300 text-sm border border-amber-500/30 animate-pulse">
-                <Mic className="w-4 h-4 text-amber-400" />
+              <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-xs sm:text-sm border border-amber-500/30 animate-pulse">
+                <Mic className="w-3.5 h-3.5 text-amber-400" />
                 كنسمعك دابا... تكلم بالدارجة أو الإنجليزية
               </span>
             )}
             {callState === 'thinking' && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-indigo-500/20 text-indigo-300 text-sm border border-indigo-500/30 animate-pulse">
-                <Sparkles className="w-4 h-4 text-indigo-400 animate-spin" />
+              <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 text-xs sm:text-sm border border-indigo-500/30 animate-pulse">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
                 الأستاذ كيفكر وكيوجد الجواب...
               </span>
             )}
             {callState === 'idle' && (
-              <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-800/60 text-slate-300 text-sm border border-slate-700">
+              <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-slate-800/60 text-slate-300 text-xs sm:text-sm border border-slate-700">
                 اضغط على الميكروفون لتحت باش تهدر
               </span>
             )}
           </div>
 
           {/* Central Pulsing Avatar & Soundwave */}
-          <div className="relative flex flex-col items-center justify-center my-auto py-4">
+          <div className="relative flex flex-col items-center justify-center my-auto py-2 sm:py-4">
             <div className="relative">
               {/* Outer pulsing wave rings */}
               <div
@@ -661,59 +673,84 @@ export const LiveVoiceCallModal: React.FC<LiveVoiceCallModalProps> = ({
           )}
         </div>
 
-        {/* Bottom Call Controls (Like modern voice app) */}
-        <div className="p-4 sm:p-6 border-t border-slate-800 bg-slate-900/80 flex items-center justify-around gap-4">
-          {/* Mute/Unmute */}
+        {/* Bottom Call Controls (Like modern mobile phone call) */}
+        <div className="p-3 sm:p-5 border-t border-slate-800 bg-slate-900/90 flex items-center justify-around gap-2 sm:gap-4 pb-safe">
+          {/* Mute/Unmute Mic */}
           <button
-            onClick={() => setIsMuted(!isMuted)}
-            className={`p-3.5 rounded-2xl border transition-all ${
+            onClick={() => {
+              unlockAudio();
+              setIsMuted(!isMuted);
+            }}
+            className={`p-3 sm:p-3.5 rounded-2xl border transition-all ${
               isMuted
                 ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
                 : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
             }`}
             title={isMuted ? 'إلغاء كتم الصوت' : 'كتم الصوت'}
           >
-            {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+            {isMuted ? <MicOff className="w-5 h-5 sm:w-6 sm:h-6" /> : <Mic className="w-5 h-5 sm:w-6 sm:h-6" />}
+          </button>
+
+          {/* Re-play audio button */}
+          <button
+            onClick={() => {
+              unlockAudio();
+              handleReplayCurrentAudio();
+            }}
+            className="p-3 sm:p-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 transition-all flex items-center gap-1"
+            title="إعادة نطق الأستاذ"
+          >
+            <Volume2 className="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
 
           {/* Main Action: Speak Now / Push-to-Talk or Finish */}
           {callState === 'listening' ? (
             <button
-              onClick={() => stopListeningAndSend()}
-              className="px-6 sm:px-8 py-3.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-base sm:text-lg flex items-center gap-2 shadow-lg shadow-amber-500/25 transition-all transform hover:scale-105 active:scale-95 animate-pulse"
+              onClick={() => {
+                unlockAudio();
+                stopListeningAndSend();
+              }}
+              className="flex-1 max-w-[220px] py-3.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm sm:text-base flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 transition-all transform active:scale-95 animate-pulse"
             >
               <Mic className="w-5 h-5 text-slate-950" />
-              <span>ساليت، صيفط للأستاذ ✓</span>
+              <span>ساليت، صيفط ✓</span>
             </button>
           ) : callState === 'speaking' ? (
             <button
               onClick={() => {
+                unlockAudio();
                 globalAudioPlayer.stop();
                 startListening();
               }}
-              className="px-6 sm:px-8 py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-sm sm:text-base flex items-center gap-2 border border-slate-700 transition-all"
+              className="flex-1 max-w-[220px] py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs sm:text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all"
             >
-              <VolumeX className="w-5 h-5 text-slate-400" />
-              <span>قاطع وتكلم دابا</span>
+              <VolumeX className="w-4 h-4 text-slate-400" />
+              <span>قاطع وتكلم</span>
             </button>
           ) : (
             <button
-              onClick={startListening}
+              onClick={() => {
+                unlockAudio();
+                startListening();
+              }}
               disabled={callState === 'thinking'}
-              className="px-6 sm:px-8 py-3.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-base sm:text-lg flex items-center gap-2 shadow-lg shadow-emerald-500/25 transition-all transform hover:scale-105 active:scale-95"
+              className="flex-1 max-w-[220px] py-3.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm sm:text-base flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 transition-all transform active:scale-95"
             >
               <Mic className="w-5 h-5 text-slate-950" />
-              <span>اضغط وتكلم بالدارجة</span>
+              <span>تكلم دابا 🎙️</span>
             </button>
           )}
 
           {/* End Call Button */}
           <button
-            onClick={handleEndCall}
-            className="p-3.5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all transform hover:scale-105 active:scale-95"
+            onClick={() => {
+              unlockAudio();
+              handleEndCall();
+            }}
+            className="p-3 sm:p-3.5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all transform active:scale-95"
             title="إنهاء المكالمة"
           >
-            <PhoneOff className="w-6 h-6" />
+            <PhoneOff className="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
         </div>
 

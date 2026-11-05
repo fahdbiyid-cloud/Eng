@@ -19,6 +19,7 @@ import {
   LiveSpeechRecognizer,
   AudioRecorder,
   playSoundEffect,
+  unlockAudio,
 } from '../utils/audio';
 
 export const PronunciationTrainer: React.FC = () => {
@@ -33,6 +34,7 @@ export const PronunciationTrainer: React.FC = () => {
   const recorderRef = useRef<AudioRecorder | null>(null);
 
   const handlePlayReferenceAudio = async () => {
+    unlockAudio();
     playSoundEffect('click');
     try {
       const res = await fetch('/api/tts', {
